@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Ancient Ruins Runner</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #1a2a15;
+            font-family: 'Georgia', serif;
+        }
+        canvas { display: block; }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #ffd700;
+            font-size: 24px;
+            text-shadow: 2px 2px 4px #000;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #gameOver {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff4444;
+            font-size: 48px;
+            text-shadow: 3px 3px 6px #000;
+            display: none;
+            text-align: center;
+            z-index: 20;
+        }
+        #gameOver button {
+            font-size: 24px;
+            padding: 15px 30px;
+            margin-top: 20px;
+            cursor: pointer;
+            background: #4a6a3a;
+            color: #ffd700;
+            border: 2px solid #ffd700;
+            border-radius: 8px;
+        }
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #aaa;
+            font-size: 14px;
+            text-align: center;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div>Очки: <span id="score">0</span></div>
+        <div>Монеты: <span id="coins">0</span></div>
+    </div>
+    <div id="gameOver">
+        <div>GAME OVER</div>
+        <div style="font-size: 24px; color: #ffd700;">Очки: <span id="finalScore">0</span></div>
+        <button onclick="location.reload()">Играть снова</button>
+    </div>
+    <div id="instructions">← → или A/D — смена полосы | ПРОБЕЛ или W — прыжок</div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Сцена
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x2d4a22);
+        scene.fog = new THREE.Fog(0x2d4a22, 30, 120);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 200);
+        camera.position.set(0, 5, 10);
+        camera.lookAt(0, 0, -10);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        document.body.appendChild(renderer.domElement);
+
+        // Освещение
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+        scene.add(ambientLight);
+
+        const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x2d4a22, 0.5);
+        scene.add(hemiLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffd700, 1.2);
+        dirLight.position.set(10, 20, 10);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 0.5;
+        dirLight.shadow.camera.far = 100;
+        dirLight.shadow.camera.left = -30;
+        dirLight.shadow.camera.right = 30;
+        dirLight.shadow.camera.top = 30;
+        dirLight.shadow.camera.bottom = -30;
+        scene.add(dirLight);
+
+        // Игровые переменные
+        let score = 0;
+        let coins = 0;
+        let speed = 0.3;
+        let gameOver = false;
+        let currentLane = 0; // -1, 0, 1
+        let targetX = 0;
+        let isJumping = false;
+        let jumpVelocity = 0;
+        const laneWidth = 3;
+        const lanePositions = [-laneWidth, 0, laneWidth];
+
+        // Игрок
+        const playerGeometry = new THREE.CapsuleGeometry(0.5, 1, 4, 8);
+        const playerMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x8b4513,
+            roughness: 0.7,
+            metalness: 0.3
+        });
+        const player = new THREE.Mesh(playerGeometry, playerMaterial);
+        player.position.set(0, 1, 0);
+        player.castShadow = true;
+        player.receiveShadow = true;
+        scene.add(player);
+
+        // Дорога
+        const roadSegments = [];
+        const segmentLength = 10;
+        const numSegments = 20;
+
+        function createRoadSegment(z) {
+            const group = new THREE.Group();
+            
+            // Основная плитка
+            const roadGeo = new THREE.BoxGeometry(10, 0.2, segmentLength);
+            const roadMat = new THREE.MeshStandardMaterial({ 
+                color: 0x8b7355,
+                roughness: 0.9
+            });
+            const road = new THREE.Mesh(roadGeo, roadMat);
+            road.position.set(0, 0, z);
+            road.receiveShadow = true;
+            group.add(road);
+
+            // Трещины с мохом (emissive)
+            for (let i = 0; i < 5; i++) {
+                const crackGeo = new THREE.BoxGeometry(0.1, 0.05, Math.random() * 2 + 1);
+                const crackMat = new THREE.MeshStandardMaterial({ 
+                    color: 0x2d5a1e,
+                    emissive: 0x1a4a0e,
+                    emissiveIntensity: 0.3
+                });
+                const crack = new THREE.Mesh(crackGeo, crackMat);
+                crack.position.set(
+                    (Math.random() - 0.5) * 8,
+                    0.1,
+                    z + (Math.random() - 0.5) * segmentLength
+                );
+                group.add(crack);
+            }
+
+            // Разметка между полосами (мох)
+            for (let lane = -1; lane <= 1; lane += 2) {
+                const mossGeo = new THREE.BoxGeometry(0.15, 0.05, segmentLength);
+                const mossMat = new THREE.MeshStandardMaterial({ 
+                    color: 0x3a6b2a,
+                    emissive: 0x2a5a1a,
+                    emissiveIntensity: 0.4
+                });
+                const moss = new THREE.Mesh(mossGeo, mossMat);
+                moss.position.set(lane * laneWidth / 2, 0.11, z);
+                group.add(moss);
+            }
+
+            // Каменные блоки по краям
+            for (let side = -1; side <= 1; side += 2) {
+                const blockGeo = new THREE.BoxGeometry(1, 1.5, 2);
+                const blockMat = new THREE.MeshStandardMaterial({ 
+                    color: 0x6b6b6b,
+                    roughness: 0.95
+                });
+                const block = new THREE.Mesh(blockGeo, blockMat);
+                block.position.set(side * 6, 0.75, z);
+                block.castShadow = true;
+                block.receiveShadow = true;
+                group.add(block);
+
+                // Лианы
+                if (Math.random() > 0.5) {
+                    const vineGeo = new THREE.CylinderGeometry(0.05, 0.05, 2, 6);
+                    const vineMat = new THREE.MeshStandardMaterial({ color: 0x2d5a1e });
+                    const vine = new THREE.Mesh(vineGeo, vineMat);
+                    vine.position.set(side * 6, 1.5, z);
+                    group.add(vine);
+                }
+            }
+
+            scene.add(group);
+            roadSegments.push({ group, z });
+        }
+
+        // Инициализация дороги
+        for (let i = 0; i < numSegments; i++) {
+            createRoadSegment(-i * segmentLength);
+        }
+
+        // Декорации (колонны, пирамиды, статуи)
+        const decorations = [];
+
+        function createDecoration(z, side) {
+            const type = Math.floor(Math.random() * 3);
+            const group = new THREE.Group();
+            const x = side * (8 + Math.random() * 5);
+
+            if (type === 0) {
+                // Колонна
+                const colGeo = new THREE.CylinderGeometry(0.5, 0.6, 4 + Math.random() * 4, 8);
+                const colMat = new THREE.MeshStandardMaterial({ color: 0x8b7355, roughness: 0.9 });
+                const col = new THREE.Mesh(colGeo, colMat);
+                col.position.set(x, 2, z);
+                col.castShadow = true;
+                group.add(col);
+
+                // Руны
+                if (Math.random() > 0.6) {
+                    const runeGeo = new THREE.BoxGeometry(0.1, 0.3, 0.1);
+                    const runeColor = Math.random() > 0.5 ? 0x00ff88 : 0xff8800;
+                    const runeMat = new THREE.MeshStandardMaterial({ 
+                        color: runeColor,
+                        emissive: runeColor,
+                        emissiveIntensity: 0.8
+                    });
+                    const rune = new THREE.Mesh(runeGeo, runeMat);
+                    rune.position.set(x + 0.6, 2 + Math.random() * 2, z);
+                    group.add(rune);
+                }
+            } else if (type === 1) {
+                // Пирамида
+                const pyrGeo = new THREE.ConeGeometry(2 + Math.random() * 2, 3 + Math.random() * 3, 4);
+                const pyrMat = new THREE.MeshStandardMaterial({ color: 0x7a6a55, roughness: 0.95 });
+                const pyr = new THREE.Mesh(pyrGeo, pyrMat);
+                pyr.position.set(x, 1.5, z);
+                pyr.castShadow = true;
+                group.add(pyr);
+            } else {
+                // Статуя
+                const statGeo = new THREE.BoxGeometry(1, 3, 1);
+                const statMat = new THREE.MeshStandardMaterial({ color: 0x6b6b6b, roughness: 0.9 });
+                const stat = new THREE.Mesh(statGeo, statMat);
+                stat.position.set(x, 1.5, z);
+                stat.castShadow = true;
+                group.add(stat);
+            }
+
+            // Факел
+            if (Math.random() > 0.7) {
+                const torchGeo = new THREE.CylinderGeometry(0.1, 0.1, 1.5, 6);
+                const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a3a2a });
+                const torch = new THREE.Mesh(torchGeo, torchMat);
+                torch.position.set(x, 1, z);
+                group.add(torch);
+
+                // Огонь
+                const fireGeo = new THREE.SphereGeometry(0.3, 8, 8);
+                const fireMat = new THREE.MeshStandardMaterial({ 
+                    color: 0xff6600,
+                    emissive: 0xff4400,
+                    emissiveIntensity: 1.5
+                });
+                const fire = new THREE.Mesh(fireGeo, fireMat);
+                fire.position.set(x, 1.8, z);
+                group.add(fire);
+
+                // Свет от факела
+                const torchLight = new THREE.PointLight(0xff6600, 1, 8);
+                torchLight.position.set(x, 2, z);
+                group.add(torchLight);
+            }
+
+            scene.add(group);
+            decorations.push({ group, z });
+        }
+
+        // Препятствия
+        const obstacles = [];
+
+        function createObstacle(z, lane) {
+            const type = Math.random() > 0.5 ? 'column' : 'chest';
+            const x = lanePositions[lane + 1];
+            const group = new THREE.Group();
+
+            if (type === 'column') {
+                // Упавшая колонна
+                const colGeo = new THREE.CylinderGeometry(0.6, 0.6, 3, 8);
+                const colMat = new THREE.MeshStandardMaterial({ color: 0x8b7355, roughness: 0.9 });
+                const col = new THREE.Mesh(colGeo, colMat);
+                col.rotation.z = Math.PI / 2;
+                col.position.set(x, 0.6, z);
+                col.castShadow = true;
+                col.receiveShadow = true;
+                group.add(col);
+                group.userData = { type: 'obstacle', height: 1.2, lane };
+            } else {
+                // Сундук
+                const chestGeo = new THREE.BoxGeometry(1.5, 1, 1);
+                const chestMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.8 });
+                const chest = new THREE.Mesh(chestGeo, chestMat);
+                chest.position.set(x, 0.5, z);
+                chest.castShadow = true;
+                chest.receiveShadow = true;
+                group.add(chest);
+                group.userData = { type: 'obstacle', height: 1, lane };
+            }
+
+            scene.add(group);
+            obstacles.push(group);
+        }
+
+        // Монеты
+        const coinObjects = [];
+
+        function createCoin(z, lane) {
+            const x = lanePositions[lane + 1];
+            const coinGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.1, 16);
+            const coinMat = new THREE.MeshStandardMaterial({ 
+                color: 0xffd700,
+                metalness: 0.9,
+                roughness: 0.1,
+                emissive: 0xffa500,
+                emissiveIntensity: 0.3
+            });
+            const coin = new THREE.Mesh(coinGeo, coinMat);
+            coin.position.set(x, 1, z);
+            coin.rotation.x = Math.PI / 2;
+            coin.castShadow = true;
+            scene.add(coin);
+            coinObjects.push({ mesh: coin, lane, collected: false });
+        }
+
+        // Частицы
+        const particles = [];
+
+        function createExplosion(position) {
+            const particleGeo = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+            const particleMat = new THREE.MeshStandardMaterial({ color: 0x8b7355 });
+            
+            for (let i = 0; i < 30; i++) {
+                const particle = new THREE.Mesh(particleGeo, particleMat);
+                particle.position.copy(position);
+                particle.velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.5,
+                    Math.random() * 0.5,
+                    (Math.random() - 0.5) * 0.5
+                );
+                particle.life = 60;
+                scene.add(particle);
+                particles.push(particle);
+            }
+        }
+
+        // Генерация уровня
+        function generateLevel() {
+            for (let i = 0; i < numSegments; i++) {
+                const z = -i * segmentLength;
+                
+                // Декорации
+                if (Math.random() > 0.3) {
+                    createDecoration(z, -1);
+                }
+                if (Math.random() > 0.3) {
+                    createDecoration(z, 1);
+                }
+
+                // Препятствия (начиная с 3-го сегмента)
+                if (i > 2 && Math.random() > 0.4) {
+                    const lane = Math.floor(Math.random() * 3) - 1;
+                    createObstacle(z, lane);
+                }
+
+                // Монеты
+                if (Math.random() > 0.5) {
+                    const lane = Math.floor(Math.random() * 3) - 1;
+                    createCoin(z, lane);
+                }
+            }
+        }
+
+        generateLevel();
+
+        // Управление
+        const keys = {};
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            
+            if (e.key === 'ArrowLeft' || e.key.toLowerCase() === 'a') {
+                if (currentLane > -1) {
+                    currentLane--;
+                    targetX = lanePositions[currentLane + 1];
+                }
+            }
+            if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'd') {
+                if (currentLane < 1) {
+                    currentLane++;
+                    targetX = lanePositions[currentLane + 1];
+                }
+            }
+            if (e.key === ' ' || e.key.toLowerCase() === 'w') {
+                if (!isJumping && player.position.y <= 1.1) {
+                    isJumping = true;
+                    jumpVelocity = 0.3;
+                }
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+
+        // Игровой цикл
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameOver) return;
+
+            // Движение игрока
+            player.position.x += (targetX - player.position.x) * 0.1;
+
+            // Прыжок
+            if (isJumping) {
+                player.position.y += jumpVelocity;
+                jumpVelocity -= 0.015;
+                if (player.position.y <= 1) {
+                    player.position.y = 1;
+                    isJumping = false;
+                    jumpVelocity = 0;
+                }
+            }
+
+            // Движение дороги
+            roadSegments.forEach((seg, idx) => {
+                seg.z += speed;
+                seg.group.position.z = seg.z;
+
+                if (seg.z > 20) {
+                    seg.z -= numSegments * segmentLength;
+                }
+            });
+
+            // Движение декораций
+            decorations.forEach((dec, idx) => {
+                dec.z += speed;
+                dec.group.position.z = dec.z;
+
+                if (dec.z > 20) {
+                    dec.z -= numSegments * segmentLength;
+                    // Регенерация
+                    scene.remove(dec.group);
+                    const newZ = dec.z - numSegments * segmentLength;
+                    const side = Math.random() > 0.5 ? 1 : -1;
+                    createDecoration(newZ, side);
+                    decorations[idx].z = newZ;
+                }
+            });
+
+            // Движение препятствий
+            obstacles.forEach((obs, idx) => {
+                obs.position.z += speed;
+
+                // Проверка столкновения
+                const dx = Math.abs(player.position.x - obs.position.x);
+                const dz = Math.abs(player.position.z - obs.position.z);
+                
+                if (dx < 1 && dz < 1 && player.position.y < obs.userData.height + 0.5) {
+                    createExplosion(player.position.clone());
+                    gameOver = true;
+                    document.getElementById('gameOver').style.display = 'block';
+                    document.getElementById('finalScore').textContent = score;
+                }
+
+                if (obs.position.z > 15) {
+                    scene.remove(obs);
+                    obstacles.splice(idx, 1);
+                    
+                    // Новая генерация
+                    const newZ = -numSegments * segmentLength + Math.random() * 10;
+                    const lane = Math.floor(Math.random() * 3) - 1;
+                    createObstacle(newZ, lane);
+                }
+            });
+
+            // Движение монет и вращение
+            coinObjects.forEach((coin, idx) => {
+                if (!coin.collected) {
+                    coin.mesh.position.z += speed;
+                    coin.mesh.rotation.y += 0.05;
+
+                    // Сбор монеты
+                    const dx = Math.abs(player.position.x - coin.mesh.position.x);
+                    const dz = Math.abs(player.position.z - coin.mesh.position.z);
+                    const dy = Math.abs(player.position.y - coin.mesh.position.y);
+
+                    if (dx < 1 && dz < 1 && dy < 1.5) {
+                        coin.collected = true;
+                        coins++;
+                        score += 10;
+                        document.getElementById('coins').textContent = coins;
+                        scene.remove(coin.mesh);
+                    }
+
+                    if (coin.mesh.position.z > 15) {
+                        scene.remove(coin.mesh);
+                        coinObjects.splice(idx, 1);
+                        
+                        // Новая монета
+                        const newZ = -numSegments * segmentLength + Math.random() * 10;
+                        const lane = Math.floor(Math.random() * 3) - 1;
+                        createCoin(newZ, lane);
+                    }
+                }
+            });
+
+            // Частицы
+            particles.forEach((p, idx) => {
+                p.position.add(p.velocity);
+                p.velocity.y -= 0.01;
+                p.life--;
+                p.rotation.x += 0.1;
+                p.rotation.y += 0.1;
+
+                if (p.life <= 0) {
+                    scene.remove(p);
+                    particles.splice(idx, 1);
+                }
+            });
+
+            // Очки
+            score += 1;
+            document.getElementById('score').textContent = score;
+
+            // Увеличение скорости
+            speed += 0.0001;
+
+            // Камера следует за игроком
+            camera.position.x = player.position.x * 0.3;
+
+            renderer.render(scene, camera);
+        }
+
+        // Ресайз
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
